@@ -7893,6 +7893,85 @@ struct FastNumericArrayConverter {
   result_type operator()(source_type const &s) const { return convert(s); }
 };
 
+/// Partial specialization for Array<cutlass::half_t, 4> <= Array<float_e4m3_t, 4>
+template <FloatRoundStyle Round>
+struct FastNumericArrayConverter<
+    cutlass::half_t, cutlass::float_e4m3_t, 4, Round> {
+  using result_type = Array<cutlass::half_t, 4>;
+  using source_type = Array<cutlass::float_e4m3_t, 4>;
+  static FloatRoundStyle const round_style = Round;
+
+  CUTLASS_DEVICE
+  static result_type convert(source_type const &source) {
+    // Assumes nested-FP encoding where each FP8 byte keeps the original FP16 sign,
+    // exponent[13:10] and mantissa[9:7] bits (with exponent bit14 guaranteed zero).
+    result_type result;
+
+    uint32_t raw = reinterpret_cast<uint32_t const &>(source);
+
+    uint32_t a = __byte_perm(raw, 0, 0x4140);
+    uint32_t b = __byte_perm(raw, 0, 0x4342);
+
+    // sign lanes: bit7 -> bit15
+    uint32_t s_a = (a & 0x00800080u) << 8;
+    uint32_t s_b = (b & 0x00800080u) << 8;
+
+    // exponent lanes: bits 6..3 -> bits 13..10 (bit14 forced 0 in nesting scheme)
+    // mantissa lanes: bits 2..0 -> bits 9..7
+    uint32_t em_a = (a & 0x007F007Fu) << 7;
+    uint32_t em_b = (b & 0x007F007Fu) << 7;
+
+    // uint32_t m_a = (a & 0x00070007u) << 7;
+    // uint32_t m_b = (b & 0x00070007u) << 7;
+
+    uint32_t lo = s_a | em_a;
+    uint32_t hi = s_b | em_b;
+
+    reinterpret_cast<uint32_t*>(&result)[0] = lo;
+    reinterpret_cast<uint32_t*>(&result)[1] = hi;
+    return result;
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const &s) const { return convert(s); }
+};
+
+/// Specialization for Array<cutlass::half_t, N> <= Array<float_e4m3_t, N>
+template <int N, FloatRoundStyle Round>
+struct FastNumericArrayConverter<
+    cutlass::half_t, cutlass::float_e4m3_t, N, Round> {
+  static_assert(!(N % 4), "N must be multiple of 4.");
+
+  using result_type = Array<cutlass::half_t, N>;
+  using source_type = Array<cutlass::float_e4m3_t, N>;
+  static FloatRoundStyle const round_style = Round;
+
+  CUTLASS_DEVICE
+  static result_type convert(source_type const &source) {
+#if defined(CUDA_PTX_FP8_CVT_ENABLED)
+    // Please fill this
+#else
+    FastNumericArrayConverter<cutlass::half_t, cutlass::float_e4m3_t, 4, Round> convert_vector_;
+
+    result_type result;
+
+    Array<cutlass::half_t, 4> *result_ptr = reinterpret_cast<Array<cutlass::half_t, 4>*>(&result);
+    Array<cutlass::float_e4m3_t, 4> const *source_ptr =
+        reinterpret_cast<Array<cutlass::float_e4m3_t, 4> const*>(&source);
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < N / 4; ++i) {
+      result_ptr[i] = convert_vector_(source_ptr[i]);
+    }
+
+    return result;
+#endif
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const &s) const { return convert(s); }
+};
+
 /// Partial specialization for Array<float> <= Array<int>
 template <int N, FloatRoundStyle Round>
 struct FastNumericArrayConverter<float, int, N, Round> {
