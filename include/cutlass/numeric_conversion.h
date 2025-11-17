@@ -6990,9 +6990,6 @@ struct FastNumericArrayConverter<
     uint32_t em_a = (a & 0x007F007Fu) << 7;
     uint32_t em_b = (b & 0x007F007Fu) << 7;
 
-    // uint32_t m_a = (a & 0x00070007u) << 7;
-    // uint32_t m_b = (b & 0x00070007u) << 7;
-
     uint32_t lo = s_a | em_a;
     uint32_t hi = s_b | em_b;
 
