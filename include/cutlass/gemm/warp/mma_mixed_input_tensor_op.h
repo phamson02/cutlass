@@ -524,11 +524,11 @@ public:
   void transform(TransformedFragmentA &dst_A, TransformedFragmentB &dst_B,
                  FragmentA const &A, FragmentB const &B) const {
 
-    // Shuffle data within warp to obtain the mma.sync operand layout
-    detail::FragmentShuffler<ElementBMma, ElementB, MmaIterations::kColumn, 
-             FragmentB::kElements, MmaOperandB::kElements, Operand::kB> shuffler_B;
-    FragmentB tmp_B; 
-    tmp_B = shuffler_B(B);
+    // Expect B to be pre-shuffled into the mma.sync operand layout by the caller.
+    // detail::FragmentShuffler<ElementBMma, ElementB, MmaIterations::kColumn,
+    //          FragmentB::kElements, MmaOperandB::kElements, Operand::kB> shuffler_B;
+    // FragmentB tmp_B = shuffler_B(B);
+    FragmentB tmp_B = B;
 
     // Convert the B operand to the Mma Instruction operand type
     detail::FragmentConverter<ElementBMma, ElementB, FragmentB::kElements> convert_B;
