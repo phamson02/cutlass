@@ -132,16 +132,8 @@ public:
   /// by each warp.
   using WarpGemm = typename Policy::Operator::Shape;
 
-  /// Define WarpIteratorB explicitly for FP8
-  using WarpIteratorB = cutlass::gemm::warp::MmaTensorOpMultiplicandTileIterator<
-      cutlass::MatrixShape<WarpGemm::kK, WarpGemm::kN>,
-      cutlass::gemm::Operand::kB,
-      typename SmemIteratorB::Element,
-      typename SmemIteratorB::Layout,
-      cutlass::MatrixShape<Operator::InstructionShape::kK, Operator::InstructionShape::kN>,
-      Operator::Policy::OpDelta::kRow,
-      32,
-      1>;
+  /// Warp-level iterator that loads FP8 B tiles from shared memory.
+  using WarpIteratorB = typename Policy::WarpIteratorB;
 
   /// Shape describing the number of warps filling the CTA
   using WarpCount = GemmShape<Shape::kM / WarpGemm::kM,
@@ -604,7 +596,63 @@ public:
 
     // Optionally clear the remaining stages of SMEM.
     if (SharedMemoryClear == SharedMemoryClearOption::kClearLastStage) {
-        // ... (omitted)
+
+      /// Iterator to write threadblock-scoped tile of A operand to shared memory
+      SmemIteratorA last_smem_iterator_A(this->smem_iterator_A_);
+      typename IteratorA::AccessType zero_A;
+
+      zero_A.clear();
+      last_smem_iterator_A.set_iteration_index(0);
+
+      // Async Copy for operand A
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < Detail::AsyncCopyIterationsPerStageA; ++j) {
+
+        typename IteratorA::AccessType *dst_ptr =
+            reinterpret_cast<typename IteratorA::AccessType *>(
+                last_smem_iterator_A.get());
+
+        *dst_ptr = zero_A;
+
+        ++last_smem_iterator_A;
+      }
+
+      /// Iterator to write threadblock-scoped tile of B operand to shared memory (Upper)
+      SmemIteratorB last_smem_iterator_B_upper(this->smem_iterator_B_upper_);
+      typename IteratorB::AccessType zero_B;
+
+      zero_B.clear();
+      last_smem_iterator_B_upper.set_iteration_index(0);
+
+      // Async Copy for operand B Upper
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < Detail::AsyncCopyIterationsPerStageB; ++j) {
+
+        typename IteratorB::AccessType *dst_ptr =
+            reinterpret_cast<typename IteratorB::AccessType *>(
+                last_smem_iterator_B_upper.get());
+
+        *dst_ptr = zero_B;
+
+        ++last_smem_iterator_B_upper;
+      }
+
+      /// Iterator to write threadblock-scoped tile of B operand to shared memory (Lower)
+      SmemIteratorB last_smem_iterator_B_lower(this->smem_iterator_B_lower_);
+      last_smem_iterator_B_lower.set_iteration_index(0);
+
+      // Async Copy for operand B Lower
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < Detail::AsyncCopyIterationsPerStageB; ++j) {
+
+        typename IteratorB::AccessType *dst_ptr =
+            reinterpret_cast<typename IteratorB::AccessType *>(
+                last_smem_iterator_B_lower.get());
+
+        *dst_ptr = zero_B;
+
+        ++last_smem_iterator_B_lower;
+      }
     }
   }
 
@@ -632,23 +680,24 @@ public:
       using MmaIterations = typename Operator::MmaIterations;
       using MmaOperandB = typename Operator::ArchMmaOperator::FragmentB;
 
+      static_assert(Operator::FragmentB::kElements % 4 == 0,
+                    "Fragment size must be divisible by 4 for packed reconstruct.");
+
       // Shuffle fp8 fragments into mma-friendly layout before reconstruction.
-      cutlass::gemm::warp::detail::FragmentShuffler<
-          ElementMmaB,
-          ElementLoad,
-          MmaIterations::kColumn,
-          Operator::FragmentB::kElements,
-          MmaOperandB::kElements,
-          cutlass::gemm::Operand::kB>
-          shuffler;
+      // cutlass::gemm::warp::detail::FragmentShuffler<
+      //     ElementMmaB,
+      //     ElementLoad,
+      //     MmaIterations::kColumn,
+      //     Operator::FragmentB::kElements,
+      //     MmaOperandB::kElements,
+      //     cutlass::gemm::Operand::kB>
+      //     shuffler;
 
-      auto shuffled_upper = shuffler(frag_B_upper);
-      auto shuffled_lower = shuffler(frag_B_lower);
+      // auto shuffled_upper = shuffler(frag_B_upper);
+      // auto shuffled_lower = shuffler(frag_B_lower);
 
-      static_assert(Operator::FragmentB::kElements % 4 == 0, "Fragment size must be divisible by 4 for packed reconstruct.");
-
-      uint32_t const *upper_u32 = reinterpret_cast<uint32_t const *>(&shuffled_upper);
-      uint32_t const *lower_u32 = reinterpret_cast<uint32_t const *>(&shuffled_lower);
+      uint32_t const* upper_u32 = reinterpret_cast<uint32_t const*>(&frag_B_upper);
+      uint32_t const *lower_u32 = reinterpret_cast<uint32_t const *>(&frag_B_lower);
       uint32_t* dst_u32 = reinterpret_cast<uint32_t*>(&dst_B);
 
       int const vec_quads = Operator::FragmentB::kElements / 4;
