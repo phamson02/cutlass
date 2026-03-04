@@ -168,6 +168,33 @@ struct MMA_Atom<MMA_Traits<MMAOperation, Args...>>
     CUTE_GCC_UNREACHABLE;
   }
 
+  // NestedFP dual-weight: allocate a register fragment typed as float_e4m3_t (8-bit)
+  // for storing raw upper/lower weight bytes before reconstruction.
+  template <class ATensor>
+  CUTE_HOST_DEVICE static constexpr
+  auto
+  make_fragment_A2(ATensor&& atensor)
+  {
+    CUTE_STATIC_ASSERT_V(rank(atensor) >= Int<3>{});  // VMK
+    CUTE_STATIC_ASSERT_V(size<0>(atensor) == size<1>(LayoutA_TV{}));
+    if constexpr (has_dereference<FrgTypeA>::value) {
+      CUTE_GCC_UNREACHABLE;
+    } else {
+      return make_fragment_like<cutlass::float_e4m3_t>(atensor);
+    }
+    CUTE_GCC_UNREACHABLE;
+  }
+
+  // NestedFP dual-weight: allocate a register fragment typed as half_t (16-bit)
+  // for storing reconstructed fp16 values from dual 8-bit weights.
+  template <class ATensor>
+  CUTE_HOST_DEVICE static constexpr
+  auto
+  make_fragment_A3(ATensor&& atensor)
+  {
+    return make_fragment_like<cutlass::half_t>(atensor);
+  }
+
   template <class BTensor>
   CUTE_HOST_DEVICE static constexpr
   auto
@@ -508,6 +535,24 @@ struct ThrMMA : TiledMMA
   partition_fragment_A(ATensor&& atensor) const
   {
     return TiledMMA::make_fragment_A(partition_A(atensor));
+  }
+
+  // NestedFP dual-weight: partition + allocate e4m3 fragment for upper/lower weight bytes
+  template <class ATensor>
+  CUTE_HOST_DEVICE constexpr
+  auto
+  partition_fragment_A2(ATensor&& atensor) const
+  {
+    return TiledMMA::make_fragment_A2(partition_A(atensor));
+  }
+
+  // NestedFP dual-weight: partition + allocate half_t fragment for reconstructed fp16 weight
+  template <class ATensor>
+  CUTE_HOST_DEVICE constexpr
+  auto
+  partition_fragment_A3(ATensor&& atensor) const
+  {
+    return TiledMMA::make_fragment_A3(partition_A(atensor));
   }
 
   template <class BTensor>

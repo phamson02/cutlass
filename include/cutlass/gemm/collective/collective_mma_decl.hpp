@@ -52,7 +52,8 @@ template <
   class GmemTiledCopyB,
   class SmemLayoutAtomB,
   class SmemCopyAtomB,
-  class TransformB
+  class TransformB,
+  class... ExtraArgs
 >
 struct CollectiveMma {
   static_assert(cutlass::detail::dependent_false<ElementA>, "Could not find a mainloop specialization.");

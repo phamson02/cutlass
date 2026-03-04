@@ -163,6 +163,53 @@ transform(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
   return transform(tensor_in1, tensor_in2, tensor_out, op);
 }
 
+// NestedFP dual-weight reconstruction: transform two e4m3 (8-bit) input tensors
+// (upper and lower weight bytes) into one fp16 (16-bit) output tensor using
+// packed uint32_t arithmetic and __byte_perm instructions.
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE constexpr
+void
+transform2(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+          Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+          Tensor<EngineOut,LayoutOut>      & tensor_out)
+{
+  // Batch logic operations
+  int B = 4;
+  int SZ = size(tensor_in1);
+
+  Tensor t1 = recast<uint32_t>(tensor_in1);
+  Tensor t2 = recast<uint32_t>(tensor_in2);
+  Tensor t3 = recast<uint32_t>(tensor_out);
+
+  CUTE_UNROLL
+  for (int i = 0; i < SZ / B; i++) {
+    uint32_t a = t1(i);
+    uint32_t b = t2(i);
+    uint32_t s = a & 0x80808080;
+    uint32_t sub = (b & 0x80808080) >> 7;
+    t1(i) = (((a - sub) >> 1) & 0x3f3f3f3f) | s;
+    uint32_t c = __byte_perm(t1(i), t2(i), 0x1504);
+    uint32_t d = __byte_perm(t1(i), t2(i), 0x3726);
+    t3((B/2)*i) = c;
+    t3((B/2)*i+1) = d;
+  }
+}
+
+// Accept mutable temporaries (rvalue tensor views from CuTe slicing)
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE constexpr
+void
+transform2(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+          Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+          Tensor<EngineOut,LayoutOut>     && tensor_out)
+{
+  return transform2(tensor_in1, tensor_in2, tensor_out);
+}
+
 namespace lazy {
 
 template <class Engine, class Layout, class Fn>

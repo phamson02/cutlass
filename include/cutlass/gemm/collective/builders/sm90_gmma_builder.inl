@@ -343,7 +343,10 @@ struct CollectiveBuilder<
        cute::is_same_v<KernelScheduleType,  KernelTmaWarpSpecializedPingpong> ||
        cute::is_same_v<KernelScheduleType,  KernelTmaWarpSpecializedCooperative> ||
        cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperative> ||
-       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpong>) && 
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpong> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>) &&
       (detail::is_use_rmem_A<ElementA_, GmemLayoutATag_, ElementB_, GmemLayoutBTag_>() ||
        // ConvertAndScale and ConvertAndScaleWithZero 
        cute::is_tuple<ElementA_>::value || cute::is_tuple<ElementB_>::value || 
@@ -362,7 +365,14 @@ private:
     cute::sizeof_bits_v<detail::deduce_mixed_width_dtype_t<0, ElementA_>> != cute::sizeof_bits_v<detail::deduce_mixed_width_dtype_t<0, ElementB_>>;
   static constexpr bool IsArrayOfPointersGemm = cute::is_any_of_v<KernelScheduleType,
                                                                   KernelPtrArrayTmaWarpSpecializedCooperative,
-                                                                  KernelPtrArrayTmaWarpSpecializedPingpong>;
+                                                                  KernelPtrArrayTmaWarpSpecializedPingpong,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
+                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>;
+  static constexpr bool IsDualWeightArrayGemm = cute::is_any_of_v<KernelScheduleType,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
+                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>;
   static_assert(IsMixedInput || !IsArrayOfPointersGemm, "Only mixed input grouped RS GEMM is supported.");
 
 public:
@@ -393,10 +403,15 @@ public:
   using GmemLayoutATag = decltype(get_stride(GmemLayoutATag_{}));
   using GmemLayoutBTag = decltype(get_stride(GmemLayoutBTag_{}));
 
-  using ElementPairA = cute::conditional_t<IsMixedInput && IsANarrow && NeitherIsTuple, cute::tuple<ElementA>, ElementA_>;
-  using ElementPairB = cute::conditional_t<IsMixedInput && !IsANarrow && NeitherIsTuple, cute::tuple<ElementB>, ElementB_>;
+  // Dual-weight collective expects plain element types (no tuple-wrapping to mark transformed side).
+  static constexpr bool WrapNarrowOperandAsTuple = IsMixedInput && NeitherIsTuple && !IsDualWeightArrayGemm;
 
-  static constexpr bool IsATransformed = cute::is_tuple<ElementPairA>::value;
+  using ElementPairA = cute::conditional_t<WrapNarrowOperandAsTuple && IsANarrow, cute::tuple<ElementA>, ElementA_>;
+  using ElementPairB = cute::conditional_t<WrapNarrowOperandAsTuple && !IsANarrow, cute::tuple<ElementB>, ElementB_>;
+
+  static constexpr bool IsATransformed =
+      cute::is_tuple<ElementPairA>::value ||
+      (IsDualWeightArrayGemm && NeitherIsTuple && !WrapNarrowOperandAsTuple && IsANarrow);
   using ElementScale = cute::conditional_t<IsATransformed, ScaleA, ScaleB>;
   using ElementZero = cute::conditional_t<IsATransformed, ZeroA, ZeroB>;
 
@@ -435,7 +450,9 @@ public:
   using AtomLayoutMNK = cute::conditional_t<
       cute::is_any_of_v<KernelScheduleType, 
                         KernelTmaWarpSpecializedCooperative,
-                        KernelPtrArrayTmaWarpSpecializedCooperative>,
+                        KernelPtrArrayTmaWarpSpecializedCooperative,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>,
       Layout<Shape<_2,_1,_1>>, Layout<Shape<_1,_1,_1>>>;
 
   using TiledMma = decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<
@@ -460,19 +477,31 @@ public:
   static constexpr int KernelSmemCarveout = static_cast<int>(TensorMapStorage + SchedulerPipelineStorage);
   static constexpr int Sm90ReducedSmemCapacityBytes = detail::sm90_smem_capacity_bytes - KernelSmemCarveout;
 
-  static constexpr int PipelineStages = IsMixedInput ?
-      ( IsArrayOfPointersGemm ? 
+  static constexpr int AutoPipelineStages = IsMixedInput ?
+      ( IsArrayOfPointersGemm ?
         detail::compute_stage_count_or_override_single_affine_transformed_input<Sm90ReducedSmemCapacityBytes,
-          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, SmemAlignment>(StageCountType{}) : 
+          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{}) :
         detail::compute_stage_count_or_override_single_affine_transformed_input<detail::sm90_smem_capacity_bytes,
-          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, SmemAlignment>(StageCountType{})
-      ) 
+          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{})
+      )
       : detail::compute_stage_count_or_override<detail::sm90_smem_capacity_bytes,
-          ElementAMma, ElementBMma, TileShape_MNK, SmemAlignment>(StageCountType{});
+          ElementAMma, ElementBMma, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{});
+
+  // Dual-weight mixed-input kernels require additional transformed-operand storage.
+  // Cap stage count to keep SM90 shared-memory usage within architectural limits.
+  static constexpr int PipelineStages =
+      IsDualWeightArrayGemm ? cute::max(2, cute::min(AutoPipelineStages, 2)) : AutoPipelineStages;
       
+  static constexpr bool IsDualWeightCustomArrayGemm = cute::is_same_v<KernelScheduleType,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>;
+
   using DispatchPolicy = cute::conditional_t<IsMixedInput,
       cute::conditional_t<IsArrayOfPointersGemm,
-        MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>, 
+        cute::conditional_t<IsDualWeightArrayGemm,
+          cute::conditional_t<IsDualWeightCustomArrayGemm,
+            MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+            MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
+          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
         MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>, 
         MainloopSm90TmaGmmaRmemAWarpSpecialized<PipelineStages, ClusterShape_MNK, KernelScheduleType>>;
 
@@ -483,7 +512,18 @@ public:
   using StrideA = cute::conditional_t<cute::is_layout<cute::remove_pointer_t<GmemLayoutATag_>>::value, GmemLayoutATag_, TagToStrideA_t<GmemLayoutATag>>;
   using StrideB = cute::conditional_t<cute::is_layout<cute::remove_pointer_t<GmemLayoutBTag_>>::value, GmemLayoutBTag_, TagToStrideB_t<GmemLayoutBTag>>;
 
-  using CollectiveOp = CollectiveMma<
+  // SmemLayoutAtomA2/SmemCopyAtomA2 must always match the post-swap narrow
+  // (register-sourced) element type with M×K tile dimensions.
+  // RealElementA is always the narrow type after the builder's SwapAB logic.
+  // When SwapAB=true the narrow type lives in the B-slot, so the pre-swap SmemCopyAtomA
+  // is void — we must compute A2-specific atoms from the narrow element directly.
+  static constexpr cute::GMMA::Major GmmaMajorA2 = SwapAB ? GmmaMajorB : GmmaMajorA;
+  using SmemLayoutAtomA2 = decltype(detail::rs_smem_selector<GmmaMajorA2, RealElementA,
+      decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{})), IsWarpSpecializedTransposeB>());
+  using SmemCopyAtomA2 = Copy_Atom<cute::AutoVectorizingCopy, RealElementA>;
+
+  using CollectiveOp =
+    CollectiveMma<
       DispatchPolicy,
       TileShape_MNK,
       ElementPairA,
@@ -498,7 +538,10 @@ public:
       GmemTiledCopyB,
       SmemLayoutAtomB,
       SmemCopyAtomB,
-      cute::identity
+      cute::identity,
+      GmemTiledCopyA,       // GmemTiledCopyA2 — same TMA copy atom
+      SmemLayoutAtomA2,     // SmemLayoutAtomA2 — M×K atom for narrow element
+      SmemCopyAtomA2        // SmemCopyAtomA2 — always non-void for register copy
     >;
 
   static_assert(SmemAlignment == static_cast<int>(cute::max(CollectiveOp::SmemAlignmentA, CollectiveOp::SmemAlignmentB)));

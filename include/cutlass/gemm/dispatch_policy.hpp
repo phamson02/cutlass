@@ -125,6 +125,10 @@ struct KernelTmaWarpSpecializedCooperative {
 
 struct KernelPtrArrayTmaWarpSpecializedCooperative { };
 struct KernelPtrArrayTmaWarpSpecializedPingpong { };
+// Dual-weight mirrored schedule tags for Ptr-Array/Grouped TMA kernels.
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight : KernelPtrArrayTmaWarpSpecializedCooperative { };
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom : KernelPtrArrayTmaWarpSpecializedCooperative { };
+struct KernelPtrArrayTmaWarpSpecializedPingpongDualWeight : KernelPtrArrayTmaWarpSpecializedPingpong { };
 
 // FP8 related policies (including Blocked Scaled Accumulation)
 struct KernelTmaWarpSpecializedCooperativeFP8Blockwise: KernelTmaWarpSpecializedCooperative { };
@@ -406,9 +410,34 @@ struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput {
   using ArchTag = arch::Sm90;
   using Schedule = KernelSchedule;
   static_assert(
-    cute::is_same_v<Schedule, KernelPtrArrayTmaWarpSpecializedCooperative> ||
-    cute::is_same_v<Schedule, KernelPtrArrayTmaWarpSpecializedPingpong>,
+    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedCooperative, Schedule> ||
+    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedPingpong, Schedule>,
     "KernelSchedule must be one of the Ptr-Array or Grouped Gemm TMA Warp Specialized Cooperative policies");
+};
+
+template<
+  int Stages_,
+  class ClusterShape_ = Shape<_1,_1,_1>,
+  class KernelSchedule = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight
+>
+struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight
+  : MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<Stages_, ClusterShape_, KernelSchedule> {
+  static_assert(
+    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight, KernelSchedule> ||
+    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedPingpongDualWeight, KernelSchedule>,
+    "KernelSchedule must be one of the dual-weight Ptr-Array or Grouped Gemm TMA Warp Specialized policies");
+};
+
+template<
+  int Stages_,
+  class ClusterShape_ = Shape<_1,_1,_1>,
+  class KernelSchedule = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom
+>
+struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom
+  : MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<Stages_, ClusterShape_, KernelSchedule> {
+  static_assert(
+    cute::is_same_v<KernelSchedule, KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>,
+    "KernelSchedule must be KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom");
 };
 
 // n-buffer in smem (Hopper TMA), pipelined with Hopper GMMA and TMA, Warp specialized dynamic schedule
