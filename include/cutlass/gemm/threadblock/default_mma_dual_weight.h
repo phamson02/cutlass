@@ -104,7 +104,14 @@ template <
     /// Gather operand A by using an index array
     bool GatherA = false,
     /// Gather operand B by using an index array
-    bool GatherB = false
+    bool GatherB = false,
+    /// When true, issue MMA(k) before transform(k+1) to expose ILP between
+    /// ALU (FP8->FP16 reconstruction) and tensor-core units.
+    bool kKBlockInterleaved = false,
+    /// When true and ElementB is float_e5m2_t, use truncation reconstruction.
+    bool kTruncateE5M2 = false,
+    /// When true and ElementB is float_e4m3_t, use FastNumericArrayConverter reconstruction.
+    bool kFastE4M3 = false
     >
 struct DefaultMmaDualWeight;
 
@@ -146,13 +153,20 @@ template <
     /// Gather operand A by using an index array
     bool GatherA,
     /// Gather operand B by using an index array
-    bool GatherB
+    bool GatherB,
+    /// K-block interleaved reconstruction
+    bool kKBlockInterleaved,
+    /// When true and ElementB is float_e5m2_t, use truncation reconstruction.
+    bool kTruncateE5M2,
+    /// When true and ElementB is float_e4m3_t, use FastNumericArrayConverter reconstruction.
+    bool kFastE4M3
     >
 struct DefaultMmaDualWeight<
     ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB,
     ElementAccumulator, LayoutC, arch::OpClassTensorOp, arch::Sm80,
     ThreadblockShape, WarpShape, InstructionShape, Stages, GemmOperator,
-    AccumulatorsInRowMajor, SharedMemoryClear, GatherA, GatherB> {
+    AccumulatorsInRowMajor, SharedMemoryClear, GatherA, GatherB, kKBlockInterleaved,
+    kTruncateE5M2, kFastE4M3> {
 
   using Shape = ThreadblockShape;
   using WarpShape_ = WarpShape;
@@ -271,7 +285,10 @@ struct DefaultMmaDualWeight<
       LayoutC,
       Policy,
       Stages,
-      SharedMemoryClear>;
+      SharedMemoryClear,
+      kKBlockInterleaved,
+      kTruncateE5M2,
+      kFastE4M3>;
 
   using ThreadblockMma = Mma;
 };

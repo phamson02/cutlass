@@ -98,7 +98,13 @@ template <
   /// Permute operand A
   typename PermuteALayout = layout::NoPermute,
   /// Permute operand B
-  typename PermuteBLayout = layout::NoPermute
+  typename PermuteBLayout = layout::NoPermute,
+  /// When true, use k-block interleaved FP8->FP16 reconstruction in mainloop.
+  bool kKBlockInterleaved = false,
+  /// When true and ElementB is float_e5m2_t, use truncation reconstruction.
+  bool kTruncateE5M2 = false,
+  /// When true and ElementB is float_e4m3_t, use FastNumericArrayConverter reconstruction.
+  bool kFastE4M3 = false
 >
 struct DefaultGemmDualWeight {
 
@@ -112,7 +118,7 @@ struct DefaultGemmDualWeight {
       ElementAccumulator, LayoutC,
       arch::OpClassTensorOp, arch::Sm80,
       ThreadblockShape, WarpShape, InstructionShape, Stages, Operator,
-      false, SharedMemoryClear, GatherA, GatherB>::ThreadblockMma;
+      false, SharedMemoryClear, GatherA, GatherB, kKBlockInterleaved, kTruncateE5M2, kFastE4M3>::ThreadblockMma;
 
   static const int kPartitionsK = ThreadblockShape::kK / WarpShape::kK;
 

@@ -86,6 +86,15 @@ template <
     int Stages,
     /// Use zfill or predicate for out-of-bound cp.async
     SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
+    /// When true, issue MMA(k) before transform(k+1) so FP8->FP16 reconstruction
+    /// integer ops can overlap the tensor-core pipeline (k-block interleaving).
+    bool kKBlockInterleaved = false,
+    /// When true and ElementB is float_e5m2_t, use truncation reconstruction
+    /// (upper = fp16[15:8], lower = fp16[7:0]) instead of round-to-nearest-even.
+    bool kTruncateE5M2 = false,
+    /// When true and ElementB is float_e4m3_t, use FastNumericArrayConverter
+    /// reconstruction (sign<<8 | em<<7) matching cutlass::FastNumericArrayConverter.
+    bool kFastE4M3 = false,
     /// Used for partial specialization
     typename Enable = bool>
 class MmaMultistageDualWeight {
@@ -706,17 +715,44 @@ public:
         uint32_t a = upper_u32[i];
         uint32_t b = lower_u32[i];
 
-        uint32_t s = a & 0x80808080u;          // keep sign bit lanes
-        uint32_t sub = (b & 0x80808080u) >> 7; // bias adjust from mantissa MSBs
-        // Per-byte subtract to avoid cross-lane borrow, then shift exponent/mantissa bits.
-        uint32_t a_sub = __vsub4(a, sub);
-        uint32_t packed_upper = ((a_sub >> 1) & 0x3f3f3f3fu) | s;
-
-        uint32_t c = __byte_perm(packed_upper, b, 0x1504);
-        uint32_t d = __byte_perm(packed_upper, b, 0x3726);
-
-        dst_u32[2 * i]     = c;
-        dst_u32[2 * i + 1] = d;
+        if constexpr (cutlass::platform::is_same<ElementLoad, cutlass::float_e5m2_t>::value) {
+          if constexpr (kTruncateE5M2) {
+            // Truncation variant: upper = fp16[15:8], lower = fp16[7:0].
+            // No rounding correction needed — just interleave the two bytes.
+            dst_u32[2 * i]     = __byte_perm(a, b, 0x1504u);
+            dst_u32[2 * i + 1] = __byte_perm(a, b, 0x3726u);
+          } else {
+            // E5M2 NestedFP round-to-nearest-even reconstruction.
+            // upper stored = upper_orig + inc, lower stored = lower_orig | inc (normal only).
+            // Detect finite-normal bytes: exponent bits [6:2] != 0.
+            // inc is in the LSB of stored_lower for normal values.
+            uint32_t exp_bits   = a & 0x7C7C7C7Cu;
+            uint32_t normal_ff  = __vcmpne4(exp_bits, 0u);        // 0xFF per normal byte, 0 otherwise
+            uint32_t normal_01  = normal_ff & 0x01010101u;        // 1 per normal byte
+            uint32_t inc_01     = b & normal_01;                  // extract rounding increment
+            uint32_t upper_orig = __vsub4(a, inc_01);             // undo increment on upper
+            uint32_t lower_orig = b & ~normal_01;                 // strip inc bit from lower
+            dst_u32[2 * i]     = __byte_perm(upper_orig, lower_orig, 0x1504u);
+            dst_u32[2 * i + 1] = __byte_perm(upper_orig, lower_orig, 0x3726u);
+          }
+        } else if constexpr (kFastE4M3) {
+          // Single-weight E4M3: FastNumericArrayConverter formula.
+          // FP16 = sign<<8 | em<<7  (em = raw[6:0] = FP16 bits[13:7]).
+          // This matches cutlass::FastNumericArrayConverter<half_t, float_e4m3_t>.
+          uint32_t lo = __byte_perm(a, 0u, 0x4140u);  // {0, a[1], 0, a[0]}
+          uint32_t hi = __byte_perm(a, 0u, 0x4342u);  // {0, a[3], 0, a[2]}
+          dst_u32[2 * i]     = (lo & 0x00800080u) << 8 | (lo & 0x007F007Fu) << 7;
+          dst_u32[2 * i + 1] = (hi & 0x00800080u) << 8 | (hi & 0x007F007Fu) << 7;
+        } else {
+          // E4M3 reconstruction.
+          // stored upper packs: sign(1) | (exp(4)+mant_hi(3)) into 7 bits with bias adjust.
+          uint32_t s         = a & 0x80808080u;          // keep sign bit lanes
+          uint32_t sub       = (b & 0x80808080u) >> 7;  // bias adjust from mantissa MSBs
+          uint32_t a_sub     = __vsub4(a, sub);
+          uint32_t packed_upper = ((a_sub >> 1) & 0x3f3f3f3fu) | s;
+          dst_u32[2 * i]     = __byte_perm(packed_upper, b, 0x1504u);
+          dst_u32[2 * i + 1] = __byte_perm(packed_upper, b, 0x3726u);
+        }
       }
   }
 
@@ -868,6 +904,117 @@ public:
   }
 
 
+  /// K-block interleaved variant of mac_loop_iter.
+  ///
+  /// Issues MMA(k) BEFORE transform(k+1) so that the FP8->FP16 reconstruction
+  /// integer ops (__vsub4 / __byte_perm) can overlap with the tensor-core
+  /// pipeline executing MMA(k).  Functionally equivalent to mac_loop_iter but
+  /// exposes more instruction-level parallelism between INT and TC units.
+  CUTLASS_DEVICE
+  void mac_loop_iter_kblock_interleaved(
+    PipeState &pipe_state,
+    FragmentC &accum,
+    IteratorA &iterator_A,
+    IteratorB &iterator_B_upper,
+    IteratorB &iterator_B_lower,
+    int &gemm_k_iterations)
+  {
+    CUTLASS_PRAGMA_UNROLL
+    for (int warp_mma_k = 0; warp_mma_k < kWarpGemmIterations; ++warp_mma_k) {
+
+      // 1. Load warp-tile (k+1) fragments from shared memory into registers.
+      this->warp_tile_iterator_A_.set_kgroup_index(
+          (warp_mma_k + 1) % kWarpGemmIterations);
+      this->warp_tile_iterator_A_.load(
+          pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2]);
+      ++this->warp_tile_iterator_A_;
+
+      warp_tile_iterator_B_upper_.set_kgroup_index(
+          (warp_mma_k + 1) % kWarpGemmIterations);
+      warp_tile_iterator_B_upper_.load(
+          pipe_state.warp_loaded_frag_B_upper_[(warp_mma_k + 1) % 2]);
+      ++warp_tile_iterator_B_upper_;
+
+      warp_tile_iterator_B_lower_.set_kgroup_index(
+          (warp_mma_k + 1) % kWarpGemmIterations);
+      warp_tile_iterator_B_lower_.load(
+          pipe_state.warp_loaded_frag_B_lower_[(warp_mma_k + 1) % 2]);
+      ++warp_tile_iterator_B_lower_;
+
+      // 2. Execute MMA for warp-tile k using pre-transformed fragments.
+      //    These fragments were transformed either in gemm_iters (k=0 of the
+      //    very first call) or in step 3 of the previous iteration.
+      if (Detail::kStagedAccumulation) {
+        warp_mma_(pipe_state.tmp_accum_,
+                  pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+                  pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
+                  pipe_state.tmp_accum_);
+
+        if (warp_mma_k == 0) {
+          plus<FragmentC> plus_accum;
+          accum = plus_accum(accum, pipe_state.tmp_accum_);
+          pipe_state.tmp_accum_.clear();
+        }
+      } else {
+        warp_mma_(accum,
+                  pipe_state.warp_transformed_frag_A_[warp_mma_k % 2],
+                  pipe_state.warp_transformed_frag_B_[warp_mma_k % 2],
+                  accum);
+      }
+
+      // 3. Transform warp-tile (k+1) from FP8 upper/lower to FP16.
+      //    These integer ops (vsub4, byte_perm) execute on ALU units while
+      //    the tensor-core pipeline processes MMA(k), hiding their latency.
+      transform_dual_weight_operands(
+          pipe_state.warp_transformed_frag_A_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_transformed_frag_B_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_A_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_B_upper_[(warp_mma_k + 1) % 2],
+          pipe_state.warp_loaded_frag_B_lower_[(warp_mma_k + 1) % 2]);
+
+      // 4. Issue global->shared copies, fence, and stage advance (same as
+      //    mac_loop_iter — this section is unchanged).
+      if (warp_mma_k < kWarpGemmIterations - 1) {
+
+        int group_start_iteration_A, group_start_iteration_B;
+        group_start_iteration_A = warp_mma_k * Detail::kAccessesPerGroupA;
+        group_start_iteration_B = warp_mma_k * Detail::kAccessesPerGroupB;
+
+        copy_tiles_and_advance(iterator_A, iterator_B_upper, iterator_B_lower,
+                               group_start_iteration_A,
+                               group_start_iteration_B);
+      }
+
+      if (warp_mma_k + 2 == kWarpGemmIterations) {
+
+        int group_start_iteration_A =
+            (warp_mma_k + 1) * Detail::kAccessesPerGroupA;
+        int group_start_iteration_B =
+            (warp_mma_k + 1) * Detail::kAccessesPerGroupB;
+
+        copy_tiles_and_advance(iterator_A, iterator_B_upper, iterator_B_lower,
+                               group_start_iteration_A,
+                               group_start_iteration_B);
+
+        cutlass::arch::cp_async_fence();
+        gmem_wait();
+        advance_smem_write_stage(iterator_A, iterator_B_upper, iterator_B_lower);
+        advance_smem_read_stage();
+
+        --gemm_k_iterations;
+        iterator_A.clear_mask(gemm_k_iterations == 0);
+        iterator_B_upper.clear_mask(gemm_k_iterations == 0);
+        iterator_B_lower.clear_mask(gemm_k_iterations == 0);
+      }
+
+      // Note: No separate end-of-loop pre-transform needed.  Step 3 above
+      // transforms index (warp_mma_k+1) % kWarpGemmIterations each iteration,
+      // so at warp_mma_k == kWarpGemmIterations-1 it naturally produces the
+      // pre-transformed k=0 fragment for the next mac_loop_iter call.
+    }
+  }
+
+
   /// Perform the specified number of threadblock mainloop iterations of matrix
   /// multiply-accumulate.  Assumes prologue has been initiated.
   CUTLASS_DEVICE
@@ -911,16 +1058,26 @@ public:
       pipe_state.tmp_accum_.clear();
     }
 
-    // Mainloop
+    // Mainloop — select between standard and k-block interleaved bodies.
     CUTLASS_GEMM_LOOP
     for (; gemm_k_iterations > (-kStages + 1);) {
-      mac_loop_iter(
-        pipe_state,
-        accum,
-        iterator_A,
-        iterator_B_upper,
-        iterator_B_lower,
-        gemm_k_iterations);
+      if constexpr (kKBlockInterleaved) {
+        mac_loop_iter_kblock_interleaved(
+          pipe_state,
+          accum,
+          iterator_A,
+          iterator_B_upper,
+          iterator_B_lower,
+          gemm_k_iterations);
+      } else {
+        mac_loop_iter(
+          pipe_state,
+          accum,
+          iterator_A,
+          iterator_B_upper,
+          iterator_B_lower,
+          gemm_k_iterations);
+      }
     }
 
     if (Detail::kStagedAccumulation) {

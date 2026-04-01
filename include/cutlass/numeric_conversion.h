@@ -7969,6 +7969,68 @@ struct FastNumericArrayConverter<
   result_type operator()(source_type const &s) const { return convert(s); }
 };
 
+/// Partial specialization for Array<cutlass::half_t, 4> <= Array<float_e5m2_t, 4>
+/// FP8 E5M2 and FP16 share the same exponent bias (15) and sign position, so
+/// conversion is just a byte shift: fp16_bits = fp8_byte << 8.
+template <FloatRoundStyle Round>
+struct FastNumericArrayConverter<cutlass::half_t, cutlass::float_e5m2_t, 4, Round> {
+  using result_type = Array<cutlass::half_t, 4>;
+  using source_type = Array<cutlass::float_e5m2_t, 4>;
+  static FloatRoundStyle const round_style = Round;
+
+  CUTLASS_DEVICE
+  static result_type convert(source_type const &source) {
+    result_type result;
+
+    uint32_t raw = reinterpret_cast<uint32_t const &>(source);
+
+    // Place each FP8 byte into the high byte of a 16-bit slot (= left-shift by 8).
+    // selector 0x1504: output = {raw[1], 0x00, raw[0], 0x00}
+    // selector 0x3726: output = {raw[3], 0x00, raw[2], 0x00}
+    uint32_t lo = __byte_perm(raw, 0u, 0x1504u);
+    uint32_t hi = __byte_perm(raw, 0u, 0x3726u);
+
+    reinterpret_cast<uint32_t *>(&result)[0] = lo;
+    reinterpret_cast<uint32_t *>(&result)[1] = hi;
+    return result;
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const &s) const { return convert(s); }
+};
+
+/// Specialization for Array<cutlass::half_t, N> <= Array<float_e5m2_t, N>
+template <int N, FloatRoundStyle Round>
+struct FastNumericArrayConverter<cutlass::half_t, cutlass::float_e5m2_t, N, Round> {
+  static_assert(!(N % 4), "N must be multiple of 4.");
+
+  using result_type = Array<cutlass::half_t, N>;
+  using source_type = Array<cutlass::float_e5m2_t, N>;
+  static FloatRoundStyle const round_style = Round;
+
+  CUTLASS_DEVICE
+  static result_type convert(source_type const &source) {
+    FastNumericArrayConverter<cutlass::half_t, cutlass::float_e5m2_t, 4, Round> convert_vector_;
+
+    result_type result;
+
+    Array<cutlass::half_t, 4> *result_ptr =
+        reinterpret_cast<Array<cutlass::half_t, 4> *>(&result);
+    Array<cutlass::float_e5m2_t, 4> const *source_ptr =
+        reinterpret_cast<Array<cutlass::float_e5m2_t, 4> const *>(&source);
+
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < N / 4; ++i) {
+      result_ptr[i] = convert_vector_(source_ptr[i]);
+    }
+
+    return result;
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const &s) const { return convert(s); }
+};
+
 /// Partial specialization for Array<float> <= Array<int>
 template <int N, FloatRoundStyle Round>
 struct FastNumericArrayConverter<float, int, N, Round> {
