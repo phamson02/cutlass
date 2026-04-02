@@ -480,17 +480,18 @@ public:
   static constexpr int AutoPipelineStages = IsMixedInput ?
       ( IsArrayOfPointersGemm ?
         detail::compute_stage_count_or_override_single_affine_transformed_input<Sm90ReducedSmemCapacityBytes,
-          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{}) :
+          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, SmemAlignment>(StageCountType{}) :
         detail::compute_stage_count_or_override_single_affine_transformed_input<detail::sm90_smem_capacity_bytes,
-          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{})
+          RealElementA, RealElementB, ElementScale, ElementZero, TileShape_MNK, SmemAlignment>(StageCountType{})
       )
       : detail::compute_stage_count_or_override<detail::sm90_smem_capacity_bytes,
-          ElementAMma, ElementBMma, TileShape_MNK, StageCountType::bytes, SmemAlignment>(StageCountType{});
+          ElementAMma, ElementBMma, TileShape_MNK, SmemAlignment>(StageCountType{});
 
   // Dual-weight mixed-input kernels require additional transformed-operand storage.
-  // Cap stage count to keep SM90 shared-memory usage within architectural limits.
+  // Allow up to 4 pipeline stages — each stage needs ~32KB for 128x128x64 tile
+  // (B:16KB + A2:8KB + A3:8KB), fitting comfortably in SM90's 228KB SMEM budget.
   static constexpr int PipelineStages =
-      IsDualWeightArrayGemm ? cute::max(2, cute::min(AutoPipelineStages, 2)) : AutoPipelineStages;
+      IsDualWeightArrayGemm ? cute::max(2, cute::min(AutoPipelineStages, 4)) : AutoPipelineStages;
       
   static constexpr bool IsDualWeightCustomArrayGemm = cute::is_same_v<KernelScheduleType,
       KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>;
