@@ -346,7 +346,11 @@ struct CollectiveBuilder<
        cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpong> ||
        cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight> ||
        cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom> ||
-       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>) &&
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc> ||
+       cute::is_same_v<KernelScheduleType,  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>) &&
       (detail::is_use_rmem_A<ElementA_, GmemLayoutATag_, ElementB_, GmemLayoutBTag_>() ||
        // ConvertAndScale and ConvertAndScaleWithZero 
        cute::is_tuple<ElementA_>::value || cute::is_tuple<ElementB_>::value || 
@@ -368,11 +372,19 @@ private:
                                                                   KernelPtrArrayTmaWarpSpecializedPingpong,
                                                                   KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
                                                                   KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
-                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>;
+                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>;
   static constexpr bool IsDualWeightArrayGemm = cute::is_any_of_v<KernelScheduleType,
                                                                   KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
                                                                   KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
-                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>;
+                                                                  KernelPtrArrayTmaWarpSpecializedPingpongDualWeight,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc,
+                                                                  KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>;
   static_assert(IsMixedInput || !IsArrayOfPointersGemm, "Only mixed input grouped RS GEMM is supported.");
 
 public:
@@ -448,11 +460,15 @@ public:
       "Mixed input GEMM does not support MN major layout except for 16bit");
 
   using AtomLayoutMNK = cute::conditional_t<
-      cute::is_any_of_v<KernelScheduleType, 
+      cute::is_any_of_v<KernelScheduleType,
                         KernelTmaWarpSpecializedCooperative,
                         KernelPtrArrayTmaWarpSpecializedCooperative,
                         KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
-                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc,
+                        KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>,
       Layout<Shape<_2,_1,_1>>, Layout<Shape<_1,_1,_1>>>;
 
   using TiledMma = decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<
@@ -493,15 +509,35 @@ public:
   static constexpr int PipelineStages =
       IsDualWeightArrayGemm ? cute::max(2, cute::min(AutoPipelineStages, 4)) : AutoPipelineStages;
       
-  static constexpr bool IsDualWeightCustomArrayGemm = cute::is_same_v<KernelScheduleType,
-      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>;
+  // Classify dual-weight reconstruction variant
+  static constexpr bool IsDualWeightCustomArrayGemm = cute::is_any_of_v<KernelScheduleType,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>;
+  static constexpr bool IsDualWeightE5M2Rtn = cute::is_any_of_v<KernelScheduleType,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom>;
+  static constexpr bool IsDualWeightE5M2Trunc = cute::is_any_of_v<KernelScheduleType,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc,
+      KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>;
+
+  // Select mainloop dispatch policy based on reconstruction variant
+  using DualWeightMainloopPolicy = cute::conditional_t<IsDualWeightE5M2Trunc,
+      cute::conditional_t<IsDualWeightCustomArrayGemm,
+        MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2TruncCustom<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+        MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2Trunc<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
+      cute::conditional_t<IsDualWeightE5M2Rtn,
+        cute::conditional_t<IsDualWeightCustomArrayGemm,
+          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2Custom<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
+        cute::conditional_t<IsDualWeightCustomArrayGemm,
+          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
+          MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight<PipelineStages, ClusterShape_MNK, KernelScheduleType>>>>;
 
   using DispatchPolicy = cute::conditional_t<IsMixedInput,
       cute::conditional_t<IsArrayOfPointersGemm,
         cute::conditional_t<IsDualWeightArrayGemm,
-          cute::conditional_t<IsDualWeightCustomArrayGemm,
-            MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom<PipelineStages, ClusterShape_MNK, KernelScheduleType>,
-            MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
+          DualWeightMainloopPolicy,
           MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>,
         MainloopSm90TmaGmmaRmemAWarpSpecializedMixedInput<PipelineStages, ClusterShape_MNK, KernelScheduleType>>, 
         MainloopSm90TmaGmmaRmemAWarpSpecialized<PipelineStages, ClusterShape_MNK, KernelScheduleType>>;

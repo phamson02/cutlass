@@ -186,7 +186,9 @@ template <
     /// Use zfill or predicate for out-of-bound cp.async
     SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
     /// Permute result D
-    typename PermuteDLayout = layout::NoPermute
+    typename PermuteDLayout = layout::NoPermute,
+    /// When true and ElementB is float_e5m2_t, use truncation reconstruction.
+    bool kTruncateE5M2 = false
     >
 struct DefaultGemmGroupedDualWeight;
 
@@ -209,7 +211,8 @@ template <
     GroupScheduleMode GroupScheduleMode_,
     typename Operator,
     SharedMemoryClearOption SharedMemoryClear,
-    typename PermuteDLayout>
+    typename PermuteDLayout,
+    bool kTruncateE5M2>
 struct DefaultGemmGroupedDualWeight<
     ElementA,
     LayoutA,
@@ -233,7 +236,8 @@ struct DefaultGemmGroupedDualWeight<
     GroupScheduleMode_,
     Operator,
     SharedMemoryClear,
-    PermuteDLayout> {
+    PermuteDLayout,
+    kTruncateE5M2> {
 
   /// Define the default GEMM kernel
   using DefaultGemmKernel = typename kernel::DefaultGemmDualWeight<
@@ -258,7 +262,11 @@ struct DefaultGemmGroupedDualWeight<
     false,
     false,
     false,
-    PermuteDLayout
+    PermuteDLayout,
+    layout::NoPermute,
+    layout::NoPermute,
+    false,             // kKBlockInterleaved
+    kTruncateE5M2      // pass through to mainloop
   >::GemmKernel;
 
   using GemmKernel = kernel::MoeFCGemmDualWeight<

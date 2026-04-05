@@ -48,6 +48,35 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass::gemm::collective {
+
+// Helper to dispatch to the correct NestedFP reconstruction based on kernel schedule.
+// Default: E4M3 RTN reconstruction (original transform2).
+enum class DualWeightReconstructionKind { E4M3_RTN, E5M2_RTN, E5M2_TRUNC };
+
+template <class KernelSchedule>
+struct DualWeightReconstructionTrait {
+  static constexpr DualWeightReconstructionKind kind =
+      cute::is_any_of_v<KernelSchedule,
+          KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc,
+          KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>
+        ? DualWeightReconstructionKind::E5M2_TRUNC
+        : cute::is_any_of_v<KernelSchedule,
+              KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+              KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom>
+          ? DualWeightReconstructionKind::E5M2_RTN
+          : DualWeightReconstructionKind::E4M3_RTN;
+};
+
+template <DualWeightReconstructionKind Kind, class T1, class T2, class T3>
+CUTE_DEVICE void dual_weight_reconstruct(T1 const& a2, T2 const& a3, T3&& out) {
+  if constexpr (Kind == DualWeightReconstructionKind::E5M2_TRUNC) {
+    cute::transform2_e5m2_trunc(a2, a3, out);
+  } else if constexpr (Kind == DualWeightReconstructionKind::E5M2_RTN) {
+    cute::transform2_e5m2_rtn(a2, a3, out);
+  } else {
+    cute::transform2(a2, a3, out);
+  }
+}
 using namespace cute;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -141,9 +170,11 @@ public:
 
   using ElementA = ElementA_;
   using ElementB = ElementB_;
-  // Dual-weight path supports only {E4M3, FP16} in either operand order.
+  // Dual-weight path supports {E4M3 or E5M2} x FP16 in either operand order.
   // Infer transformed-side from element ordering (builder guarantees plain element types).
-  static constexpr bool IsATransformed = cute::is_same_v<ElementA, cutlass::float_e4m3_t>;
+  static constexpr bool IsATransformed =
+      cute::is_same_v<ElementA, cutlass::float_e4m3_t> ||
+      cute::is_same_v<ElementA, cutlass::float_e5m2_t>;
 
   using StrideA = StrideA_;
   using InternalStrideA = cute::remove_pointer_t<StrideA>;
@@ -238,12 +269,19 @@ public:
   static constexpr bool IsDualWeightKernelSchedule = cute::is_any_of_v<
       KernelSchedule,
       cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongDualWeight>;
-  static_assert(IsDualWeightKernelSchedule,
-                "This collective requires a dual-weight array kernel schedule.");
-  static_assert(cute::is_same_v<RealSwappedElementA, cutlass::float_e4m3_t> &&
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpongDualWeight,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc>;
+  static_assert((cute::is_same_v<RealSwappedElementA, cutlass::float_e4m3_t> ||
+                 cute::is_same_v<RealSwappedElementA, cutlass::float_e5m2_t>) &&
                     cute::is_same_v<RealSwappedElementB, cutlass::half_t>,
-                "Dual-weight RS collective requires reconstructed E4M3 x FP16 input pair.");
+                "Dual-weight RS collective requires reconstructed FP8 (E4M3 or E5M2) x FP16 input pair.");
+  static constexpr DualWeightReconstructionKind kReconstructionKind =
+      DualWeightReconstructionTrait<KernelSchedule>::kind;
+  // Verify e5m2 weight types use e5m2 reconstruction, not e4m3
+  static_assert(!(cute::is_same_v<RealSwappedElementA, cutlass::float_e5m2_t> &&
+                  kReconstructionKind == DualWeightReconstructionKind::E4M3_RTN),
+                "E5M2 weights must use E5M2 reconstruction, not E4M3 — check KernelSchedule type.");
   static constexpr size_t SmemAlignmentA2 = cutlass::detail::alignment_for_swizzle(SmemLayoutA2{});
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
   // Alias for builder compatibility (CollectiveBuilder checks SmemAlignmentA)
@@ -843,22 +881,22 @@ public:
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,2,read_stage), tCrA_copy_view3(_,_,2));
       copy(smem_tiled_copy_A2, tCsA_copy_view2(_,_,3,read_stage), tCrA_copy_view2(_,_,3));
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,3,read_stage), tCrA_copy_view3(_,_,3));
-      cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,0), tCrB(_,_,0,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,1), tCrB(_,_,1,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,2), tCrB(_,_,2,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,3), tCrB(_,_,3,read_stage), accum);
@@ -877,7 +915,7 @@ public:
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,1,smem_pipe_read.index()), tCrA_copy_view3(_,_,1));
       copy(smem_tiled_copy_A2, tCsA_copy_view2(_,_,2,smem_pipe_read.index()), tCrA_copy_view2(_,_,2));
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,2,smem_pipe_read.index()), tCrA_copy_view3(_,_,2));
-      cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
     }
 
     warpgroup_fence_operand(accum);
@@ -894,12 +932,12 @@ public:
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,0), tCrB(_,_,0,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,1), tCrB(_,_,1,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
 
       // Wait for first 2 GMMAs of this tile to complete, then release the PREVIOUS tile's stage
       // CRITICAL: release must happen BEFORE consumer_wait to avoid 2-stage pipeline deadlock
@@ -919,12 +957,12 @@ public:
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,2), tCrB(_,_,2,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,3), tCrB(_,_,3,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
 
       warpgroup_fence_operand(accum);
     }
@@ -939,19 +977,19 @@ public:
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,0), tCrB(_,_,0,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,1), tCrB(_,_,1,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
 
       warpgroup_wait<2>();
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,2), tCrB(_,_,2,read_stage), accum);
       warpgroup_commit_batch();
-      cute::transform2(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,3), tCrB(_,_,3,read_stage), accum);

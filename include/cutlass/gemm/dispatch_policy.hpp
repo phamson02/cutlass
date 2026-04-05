@@ -125,10 +125,18 @@ struct KernelTmaWarpSpecializedCooperative {
 
 struct KernelPtrArrayTmaWarpSpecializedCooperative { };
 struct KernelPtrArrayTmaWarpSpecializedPingpong { };
+
 // Dual-weight mirrored schedule tags for Ptr-Array/Grouped TMA kernels.
+// E4M3 RTN reconstruction (default)
 struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight : KernelPtrArrayTmaWarpSpecializedCooperative { };
 struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom : KernelPtrArrayTmaWarpSpecializedCooperative { };
 struct KernelPtrArrayTmaWarpSpecializedPingpongDualWeight : KernelPtrArrayTmaWarpSpecializedPingpong { };
+// E5M2 RTN reconstruction
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2 : KernelPtrArrayTmaWarpSpecializedCooperative { };
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom : KernelPtrArrayTmaWarpSpecializedCooperative { };
+// E5M2 truncation reconstruction
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc : KernelPtrArrayTmaWarpSpecializedCooperative { };
+struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom : KernelPtrArrayTmaWarpSpecializedCooperative { };
 
 // FP8 related policies (including Blocked Scaled Accumulation)
 struct KernelTmaWarpSpecializedCooperativeFP8Blockwise: KernelTmaWarpSpecializedCooperative { };
@@ -422,10 +430,6 @@ template<
 >
 struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight
   : MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<Stages_, ClusterShape_, KernelSchedule> {
-  static_assert(
-    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight, KernelSchedule> ||
-    cute::is_base_of_v<KernelPtrArrayTmaWarpSpecializedPingpongDualWeight, KernelSchedule>,
-    "KernelSchedule must be one of the dual-weight Ptr-Array or Grouped Gemm TMA Warp Specialized policies");
 };
 
 template<
@@ -435,10 +439,25 @@ template<
 >
 struct MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom
   : MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInput<Stages_, ClusterShape_, KernelSchedule> {
-  static_assert(
-    cute::is_same_v<KernelSchedule, KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>,
-    "KernelSchedule must be KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom");
 };
+
+// E5M2 dual-weight mainloop policies — reuse the same CollectiveMma as E4M3.
+// The reconstruction kind is selected at compile time via DualWeightReconstructionTrait<KernelSchedule>.
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2>
+using MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2 =
+    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight<S, C, K>;
+
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom>
+using MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2Custom =
+    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom<S, C, K>;
+
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Trunc>
+using MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2Trunc =
+    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeight<S, C, K>;
+
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>
+using MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightE5M2TruncCustom =
+    MainloopSm90ArrayTmaGmmaWarpSpecializedMixedInputDualWeightCustom<S, C, K>;
 
 // n-buffer in smem (Hopper TMA), pipelined with Hopper GMMA and TMA, Warp specialized dynamic schedule
 // For FP8 kernels with Block Scaling

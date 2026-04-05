@@ -210,6 +210,100 @@ transform2(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
   return transform2(tensor_in1, tensor_in2, tensor_out);
 }
 
+// NestedFP E5M2 RTN reconstruction: undo round-to-nearest packing for E5M2 format.
+// stored_upper = upper_orig + inc, stored_lower = lower_orig | inc (normal only).
+// Reconstruction detects normal bytes and reverses the rounding.
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE
+void
+transform2_e5m2_rtn(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+                    Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+                    Tensor<EngineOut,LayoutOut>      & tensor_out)
+{
+#if defined(__CUDA_ARCH__)
+  int B = 4;
+  int SZ = size(tensor_in1);
+
+  Tensor t1 = recast<uint32_t>(tensor_in1);
+  Tensor t2 = recast<uint32_t>(tensor_in2);
+  Tensor t3 = recast<uint32_t>(tensor_out);
+
+  CUTE_UNROLL
+  for (int i = 0; i < SZ / B; i++) {
+    uint32_t a = t1(i);
+    uint32_t b = t2(i);
+    // Detect normal bytes: exponent bits [6:2] != 0 per byte.
+    uint32_t exp_bits   = a & 0x7C7C7C7Cu;
+    uint32_t normal_ff  = __vcmpne4(exp_bits, 0u);         // 0xFF per normal byte, 0 otherwise
+    uint32_t normal_01  = normal_ff & 0x01010101u;          // 1 per normal byte
+    uint32_t inc_01     = b & normal_01;                   // extract rounding increment (normals only)
+    uint32_t upper_orig = a - inc_01;                      // undo increment
+    uint32_t lower_orig = b & ~normal_01;                  // strip inc bit from lower
+    uint32_t c = __byte_perm(upper_orig, lower_orig, 0x1504u);
+    uint32_t d = __byte_perm(upper_orig, lower_orig, 0x3726u);
+    t3((B/2)*i) = c;
+    t3((B/2)*i+1) = d;
+  }
+#endif
+}
+
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE constexpr
+void
+transform2_e5m2_rtn(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+                    Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+                    Tensor<EngineOut,LayoutOut>     && tensor_out)
+{
+  return transform2_e5m2_rtn(tensor_in1, tensor_in2, tensor_out);
+}
+
+// NestedFP E5M2 truncation reconstruction: upper = fp16[15:8], lower = fp16[7:0].
+// No rounding correction — just interleave the two bytes back.
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE
+void
+transform2_e5m2_trunc(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+                      Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+                      Tensor<EngineOut,LayoutOut>      & tensor_out)
+{
+#if defined(__CUDA_ARCH__)
+  int B = 4;
+  int SZ = size(tensor_in1);
+
+  Tensor t1 = recast<uint32_t>(tensor_in1);
+  Tensor t2 = recast<uint32_t>(tensor_in2);
+  Tensor t3 = recast<uint32_t>(tensor_out);
+
+  CUTE_UNROLL
+  for (int i = 0; i < SZ / B; i++) {
+    uint32_t a = t1(i);
+    uint32_t b = t2(i);
+    uint32_t c = __byte_perm(a, b, 0x1504u);
+    uint32_t d = __byte_perm(a, b, 0x3726u);
+    t3((B/2)*i) = c;
+    t3((B/2)*i+1) = d;
+  }
+#endif
+}
+
+template <class EngineIn1, class LayoutIn1,
+          class EngineIn2, class LayoutIn2,
+          class EngineOut, class LayoutOut>
+CUTE_DEVICE constexpr
+void
+transform2_e5m2_trunc(Tensor<EngineIn1,LayoutIn1> const& tensor_in1,
+                      Tensor<EngineIn2,LayoutIn2> const& tensor_in2,
+                      Tensor<EngineOut,LayoutOut>     && tensor_out)
+{
+  return transform2_e5m2_trunc(tensor_in1, tensor_in2, tensor_out);
+}
+
 namespace lazy {
 
 template <class Engine, class Layout, class Fn>

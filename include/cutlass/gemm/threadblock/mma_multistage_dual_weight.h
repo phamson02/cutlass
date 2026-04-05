@@ -728,10 +728,10 @@ public:
             // inc is in the LSB of stored_lower for normal values.
             uint32_t exp_bits   = a & 0x7C7C7C7Cu;
             uint32_t normal_ff  = __vcmpne4(exp_bits, 0u);        // 0xFF per normal byte, 0 otherwise
-            uint32_t normal_01  = normal_ff & 0x01010101u;        // 1 per normal byte
-            uint32_t inc_01     = b & normal_01;                  // extract rounding increment
-            uint32_t upper_orig = __vsub4(a, inc_01);             // undo increment on upper
-            uint32_t lower_orig = b & ~normal_01;                 // strip inc bit from lower
+            uint32_t normal_01  = normal_ff & 0x01010101u;         // 1 per normal byte
+            uint32_t inc_01     = b & normal_01;                   // extract rounding increment
+            uint32_t upper_orig = a - inc_01;                      // undo increment
+            uint32_t lower_orig = b & ~normal_01;                  // strip inc bit from lower
             dst_u32[2 * i]     = __byte_perm(upper_orig, lower_orig, 0x1504u);
             dst_u32[2 * i + 1] = __byte_perm(upper_orig, lower_orig, 0x3726u);
           }
@@ -748,7 +748,7 @@ public:
           // stored upper packs: sign(1) | (exp(4)+mant_hi(3)) into 7 bits with bias adjust.
           uint32_t s         = a & 0x80808080u;          // keep sign bit lanes
           uint32_t sub       = (b & 0x80808080u) >> 7;  // bias adjust from mantissa MSBs
-          uint32_t a_sub     = __vsub4(a, sub);
+          uint32_t a_sub     = a - sub;                  // undo bias adjust
           uint32_t packed_upper = ((a_sub >> 1) & 0x3f3f3f3fu) | s;
           dst_u32[2 * i]     = __byte_perm(packed_upper, b, 0x1504u);
           dst_u32[2 * i + 1] = __byte_perm(packed_upper, b, 0x3726u);

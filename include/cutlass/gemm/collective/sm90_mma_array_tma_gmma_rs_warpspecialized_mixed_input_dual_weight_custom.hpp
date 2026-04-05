@@ -47,6 +47,9 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Include non-custom dual-weight collective for shared DualWeightReconstructionTrait
+#include "cutlass/gemm/collective/sm90_mma_array_tma_gmma_rs_warpspecialized_mixed_input_dual_weight.hpp"
+
 namespace cutlass::gemm::collective {
 using namespace cute;
 
@@ -107,9 +110,11 @@ public:
 
   using ElementA = ElementA_;
   using ElementB = ElementB_;
-  // Dual-weight path supports only {E4M3, FP16} in either operand order.
+  // Dual-weight path supports {E4M3 or E5M2} x FP16 in either operand order.
   // Infer transformed-side from element ordering (builder guarantees plain element types).
-  static constexpr bool IsATransformed = cute::is_same_v<ElementA, cutlass::float_e4m3_t>;
+  static constexpr bool IsATransformed =
+      cute::is_same_v<ElementA, cutlass::float_e4m3_t> ||
+      cute::is_same_v<ElementA, cutlass::float_e5m2_t>;
 
   using StrideA = StrideA_;
   using InternalStrideA = cute::remove_pointer_t<StrideA>;
@@ -201,14 +206,19 @@ public:
       "GmemTiledCopy - invalid SM90 TMA copy atom specified for A2.");
 
 public:
-  static constexpr bool IsDualWeightKernelSchedule = cute::is_same_v<
+  static constexpr bool IsDualWeightKernelSchedule = cute::is_any_of_v<
       KernelSchedule,
-      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom>;
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightCustom,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2TruncCustom>;
   static_assert(IsDualWeightKernelSchedule,
-                "This collective requires the cooperative dual-weight custom kernel schedule.");
-  static_assert(cute::is_same_v<RealSwappedElementA, cutlass::float_e4m3_t> &&
+                "This collective requires a cooperative dual-weight custom kernel schedule.");
+  static_assert((cute::is_same_v<RealSwappedElementA, cutlass::float_e4m3_t> ||
+                 cute::is_same_v<RealSwappedElementA, cutlass::float_e5m2_t>) &&
                     cute::is_same_v<RealSwappedElementB, cutlass::half_t>,
-                "Dual-weight RS collective requires reconstructed E4M3 x FP16 input pair.");
+                "Dual-weight RS collective requires reconstructed FP8 (E4M3 or E5M2) x FP16 input pair.");
+  static constexpr DualWeightReconstructionKind kReconstructionKind =
+      DualWeightReconstructionTrait<KernelSchedule>::kind;
   static constexpr size_t SmemAlignmentA2 = cutlass::detail::alignment_for_swizzle(SmemLayoutA2{});
   static constexpr size_t SmemAlignmentB = cutlass::detail::alignment_for_swizzle(SmemLayoutB{});
   // Alias for builder compatibility (CollectiveBuilder checks SmemAlignmentA)
@@ -761,7 +771,7 @@ public:
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,1,read_stage), tCrA_copy_view3(_,_,1));
       // Transform k_block 0
       Tensor t = tmp(_,_,0);
-      cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), t);
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), t);
       warpgroup_fence_operand(t);
 
       CUTLASS_PRAGMA_UNROLL
@@ -773,7 +783,7 @@ public:
         }
         // Transform next k_block
         Tensor t = tmp(_,_,k_block + 1);
-        cute::transform2(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
+        dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
         warpgroup_fence_operand(t);
 
         warpgroup_arrive();
@@ -790,7 +800,7 @@ public:
       copy(smem_tiled_copy_A2, tCsA_copy_view2(_,_,1,smem_pipe_read.index()), tCrA_copy_view2(_,_,1));
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,1,smem_pipe_read.index()), tCrA_copy_view3(_,_,1));
       Tensor t2 = tmp(_,_,0);
-      cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), t2);
+      dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), t2);
       warpgroup_fence_operand(t2);
 
       // Issue last GEMM of current tile
@@ -827,7 +837,7 @@ public:
           copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,0,smem_pipe_read.index()), tCrA_copy_view3(_,_,0));
           // Transform last k_block of current tile
           Tensor t = tmp(_,_,size<2>(tCrB) - 1);
-          cute::transform2(tCrA2(_,_,size<2>(tCrB) - 1), tCrA3(_,_,size<2>(tCrB) - 1), t);
+          dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,size<2>(tCrB) - 1), tCrA3(_,_,size<2>(tCrB) - 1), t);
           warpgroup_fence_operand(t);
         } else if (k_block == size<2>(tCrB) - 1) {
           // Prefetch second k_block from next tile
@@ -835,7 +845,7 @@ public:
           copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,1,smem_pipe_read.index()), tCrA_copy_view3(_,_,1));
           // Transform first k_block of next tile
           Tensor t = tmp(_,_,0);
-          cute::transform2(tCrA2(_,_,0), tCrA3(_,_,0), t);
+          dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), t);
           warpgroup_fence_operand(t);
         } else {
           // Prefetch from current tile
@@ -843,7 +853,7 @@ public:
           copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,k_block + 2,read_stage), tCrA_copy_view3(_,_,k_block + 2));
           // Transform next k_block of current tile
           Tensor t = tmp(_,_,k_block + 1);
-          cute::transform2(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
+          dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
           warpgroup_fence_operand(t);
         }
 
@@ -873,7 +883,7 @@ public:
           copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,k_block + 2,read_stage), tCrA_copy_view3(_,_,k_block + 2));
         }
         Tensor t = tmp(_,_,k_block + 1);
-        cute::transform2(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
+        dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,k_block + 1), tCrA3(_,_,k_block + 1), t);
         warpgroup_fence_operand(t);
 
         warpgroup_arrive();
