@@ -187,6 +187,8 @@ template <
     SharedMemoryClearOption SharedMemoryClear = SharedMemoryClearOption::kNone,
     /// Permute result D
     typename PermuteDLayout = layout::NoPermute,
+    /// When true, use k-block interleaved FP8->FP16 reconstruction in mainloop.
+    bool kKBlockInterleaved = false,
     /// When true and ElementB is float_e5m2_t, use truncation reconstruction.
     bool kTruncateE5M2 = false
     >
@@ -212,6 +214,7 @@ template <
     typename Operator,
     SharedMemoryClearOption SharedMemoryClear,
     typename PermuteDLayout,
+    bool kKBlockInterleaved,
     bool kTruncateE5M2>
 struct DefaultGemmGroupedDualWeight<
     ElementA,
@@ -237,6 +240,7 @@ struct DefaultGemmGroupedDualWeight<
     Operator,
     SharedMemoryClear,
     PermuteDLayout,
+    kKBlockInterleaved,
     kTruncateE5M2> {
 
   /// Define the default GEMM kernel
@@ -265,7 +269,7 @@ struct DefaultGemmGroupedDualWeight<
     PermuteDLayout,
     layout::NoPermute,
     layout::NoPermute,
-    false,             // kKBlockInterleaved
+    kKBlockInterleaved,
     kTruncateE5M2      // pass through to mainloop
   >::GemmKernel;
 
