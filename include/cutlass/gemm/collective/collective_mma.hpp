@@ -52,6 +52,7 @@
 #include "cutlass/gemm/collective/sm90_mma_array_tma_gmma_ss_warpspecialized_fp8.hpp"
 #include "cutlass/gemm/collective/sm90_mma_array_tma_gmma_rs_warpspecialized_mixed_input_dual_weight.hpp"
 #include "cutlass/gemm/collective/sm90_mma_array_tma_gmma_rs_warpspecialized_mixed_input_dual_weight_custom.hpp"
+#include "cutlass/gemm/collective/sm90_mma_tma_gmma_rs_warpspecialized_dual_weight.hpp"
 #include "cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized_fp8_blockwise_scaling.hpp"
 #include "cutlass/gemm/collective/sm90_mma_array_tma_gmma_ss_warpspecialized_fp8_blockwise_scaling.hpp"
 #if !defined(__CUDACC_RTC__)

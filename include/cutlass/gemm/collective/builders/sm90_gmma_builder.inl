@@ -1261,6 +1261,110 @@ struct CollectiveBuilder<
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// GMMA_TMA_WS_RS Custom — standalone (non-array) dual-weight GEMM
+// Used by NestedFP SM90 dual-weight GEMM (not fused MOE).
+template <
+  class ElementA,
+  class GmemLayoutATag,
+  int AlignmentA,
+  class ElementB,
+  class GmemLayoutBTag,
+  int AlignmentB,
+  class ElementAccumulator,
+  class TileShape_MNK,
+  class ClusterShape_MNK,
+  class StageCountType,
+  class KernelScheduleType
+>
+struct CollectiveBuilder<
+    arch::Sm90,
+    arch::OpClassTensorOp,
+    ElementA,
+    GmemLayoutATag,
+    AlignmentA,
+    ElementB,
+    GmemLayoutBTag,
+    AlignmentB,
+    ElementAccumulator,
+    TileShape_MNK,
+    ClusterShape_MNK,
+    StageCountType,
+    KernelScheduleType,
+    cute::enable_if_t<
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCustom> ||
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperativeCustom> ||
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedDualWeightE5M2> ||
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperativeDualWeightE5M2>>
+> {
+  static_assert(is_static<TileShape_MNK>::value);
+  static_assert(is_static<ClusterShape_MNK>::value);
+  static_assert(detail::is_aligned<ElementA, AlignmentA, ElementB, AlignmentB, detail::tma_alignment_bytes>(),
+                "Should meet TMA alignment requirement\n");
+#ifndef CUTLASS_SM90_COLLECTIVE_BUILDER_SUPPORTED
+  static_assert(cutlass::detail::dependent_false<ElementA>, "Unsupported Toolkit for SM90 Collective Builder\n");
+#endif
+  static constexpr cute::GMMA::Major GmmaMajorA = detail::gmma_rs_tag_to_major_A<GmemLayoutATag>();
+  static constexpr cute::GMMA::Major GmmaMajorB = detail::gmma_rs_tag_to_major_B<GmemLayoutBTag>();
+  static constexpr bool SwapAB = detail::is_swapAB<ElementA, GmemLayoutATag, ElementB, GmemLayoutBTag>();
+  static constexpr bool IsWarpSpecializedTransposeB = detail::is_warpspecialized_transpose_B<
+      ElementA, GmemLayoutATag, ElementB, GmemLayoutBTag, KernelScheduleType>();
+
+  using ElementAMma = cute::conditional_t<cute::is_same_v<ElementA, float>, tfloat32_t, ElementA>;
+  using ElementBMma = cute::conditional_t<cute::is_same_v<ElementB, float>, tfloat32_t, ElementB>;
+
+  using AtomLayoutMNK = cute::conditional_t<
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperativeCustom> ||
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperativeDualWeightE5M2>,
+      Layout<Shape<_2,_1,_1>>, Layout<Shape<_1,_1,_1>>>;
+
+  using TiledMma = decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<
+      ElementAMma, ElementBMma, ElementAccumulator, TileShape_MNK, GMMA::Major::K, GMMA::Major::K>(), AtomLayoutMNK{}));
+
+  using GmemTiledCopyA = decltype(detail::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape_MNK{})));
+  using GmemTiledCopyB = decltype(detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape_MNK{})));
+  using GmemTiledCopyA2 = decltype(detail::sm90_cluster_shape_to_tma_atom(shape<1>(ClusterShape_MNK{})));
+
+  // SmemLayoutAtomA uses K/2 because each dual FP8 byte pair reconstructs to one FP16 element.
+  using SmemLayoutAtomA = decltype(detail::rs_smem_selector<GmmaMajorA, ElementAMma,
+      decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::Int<cute::get<2>(TileShape_MNK{}) / 2>{}), IsWarpSpecializedTransposeB>());
+  using SmemLayoutAtomB = decltype(detail::rs_smem_selector<GmmaMajorB, ElementBMma,
+      decltype(cute::get<1>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{})), IsWarpSpecializedTransposeB>());
+  using SmemLayoutAtomA2 = decltype(detail::rs_smem_selector<GmmaMajorA, cutlass::float_e4m3_t,
+      decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{})), IsWarpSpecializedTransposeB>());
+
+  static constexpr int PipelineStages = detail::compute_stage_count_or_override<detail::sm90_smem_capacity_bytes,
+      ElementAMma, ElementBMma, TileShape_MNK, 128>(StageCountType{});
+
+  using DispatchPolicy = MainloopSm90TmaGmmaRmemAWarpSpecializedDualWeight<PipelineStages, ClusterShape_MNK, KernelScheduleType>;
+
+  using SmemCopyAtomA = cute::conditional_t<SwapAB, void, Copy_Atom<cute::AutoVectorizingCopy, ElementA>>;
+  using SmemCopyAtomB = cute::conditional_t<SwapAB, Copy_Atom<cute::AutoVectorizingCopy, ElementB>, void>;
+  using SmemCopyAtomA2 = cute::conditional_t<SwapAB, void, Copy_Atom<cute::AutoVectorizingCopy, cutlass::float_e4m3_t>>;
+
+  using CollectiveOp = CollectiveMma<
+      DispatchPolicy,
+      TileShape_MNK,
+      ElementA,
+      TagToStrideA_t<GmemLayoutATag>,
+      ElementB,
+      TagToStrideB_t<GmemLayoutBTag>,
+      TiledMma,
+      GmemTiledCopyA,
+      SmemLayoutAtomA,
+      SmemCopyAtomA,
+      cute::identity,
+      GmemTiledCopyB,
+      SmemLayoutAtomB,
+      SmemCopyAtomB,
+      cute::identity,
+      GmemTiledCopyA2,
+      SmemLayoutAtomA2,
+      SmemCopyAtomA2
+    >;
+};
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 } // namespace cutlass::gemm::collective
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

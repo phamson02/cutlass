@@ -62,6 +62,7 @@ struct IsCutlass3ArrayKernel<ProblemShape, cute::void_t<typename ProblemShape::U
 #include "cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp"
 #include "cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized_pingpong.hpp"
 #include "cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized_cooperative.hpp"
+#include "cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized_dual_weight.hpp"
 #include "cutlass/gemm/kernel/sm90_gemm_array_tma_warpspecialized_pingpong.hpp"
 #include "cutlass/gemm/kernel/sm90_gemm_array_tma_warpspecialized_cooperative.hpp"
 #include "cutlass/gemm/kernel/sm100_gemm_tma_warpspecialized.hpp"

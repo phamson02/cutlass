@@ -62,7 +62,9 @@ struct DualWeightReconstructionTrait {
         ? DualWeightReconstructionKind::E5M2_TRUNC
         : cute::is_any_of_v<KernelSchedule,
               KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2,
-              KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom>
+              KernelPtrArrayTmaWarpSpecializedCooperativeDualWeightE5M2Custom,
+              KernelTmaWarpSpecializedDualWeightE5M2,
+              KernelTmaWarpSpecializedCooperativeDualWeightE5M2>
           ? DualWeightReconstructionKind::E5M2_RTN
           : DualWeightReconstructionKind::E4M3_RTN;
 };

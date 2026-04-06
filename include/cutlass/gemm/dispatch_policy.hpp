@@ -126,6 +126,14 @@ struct KernelTmaWarpSpecializedCooperative {
 struct KernelPtrArrayTmaWarpSpecializedCooperative { };
 struct KernelPtrArrayTmaWarpSpecializedPingpong { };
 
+// Standalone (non-array) SM90 dual-weight custom kernel schedule tags.
+// E4M3 RTN reconstruction (default)
+struct KernelTmaWarpSpecializedCustom { };
+struct KernelTmaWarpSpecializedCooperativeCustom : KernelTmaWarpSpecializedCooperative { };
+// E5M2 RTN reconstruction
+struct KernelTmaWarpSpecializedDualWeightE5M2 : KernelTmaWarpSpecializedCustom { };
+struct KernelTmaWarpSpecializedCooperativeDualWeightE5M2 : KernelTmaWarpSpecializedCooperative { };
+
 // Dual-weight mirrored schedule tags for Ptr-Array/Grouped TMA kernels.
 // E4M3 RTN reconstruction (default)
 struct KernelPtrArrayTmaWarpSpecializedCooperativeDualWeight : KernelPtrArrayTmaWarpSpecializedCooperative { };
@@ -476,6 +484,29 @@ struct MainloopSm90ArrayTmaGmmaWarpSpecializedBlockwise
     >,
     "KernelSchedule must be one of the warp specialized FP8 block scale policies");
 };
+
+// Standalone (non-array) SM90 dual-weight custom mainloop policy.
+// Single policy handles both cooperative and non-cooperative — the difference is
+// only in KernelSchedule (which controls AtomLayoutMNK in the builder) and
+// ClusterShape (which controls TMA multicast).
+template<
+  int Stages_,
+  class ClusterShape_ = Shape<_1,_1,_1>,
+  class KernelSchedule = KernelTmaWarpSpecializedCustom
+>
+struct MainloopSm90TmaGmmaRmemAWarpSpecializedDualWeight {
+  constexpr static int Stages = Stages_;
+  using ClusterShape = ClusterShape_;
+  using ArchTag = arch::Sm90;
+  using Schedule = KernelSchedule;
+};
+
+// Aliases for backward compatibility with builder
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelTmaWarpSpecializedCustom>
+using MainloopSm90TmaGmmaRmemAWarpSpecializedCustom = MainloopSm90TmaGmmaRmemAWarpSpecializedDualWeight<S, C, K>;
+
+template<int S, class C = Shape<_1,_1,_1>, class K = KernelTmaWarpSpecializedCooperativeCustom>
+using MainloopSm90TmaGmmaRmemAWarpSpecializedCooperativeCustom = MainloopSm90TmaGmmaRmemAWarpSpecializedDualWeight<S, C, K>;
 
 //////////////////////////////////////////////////////////////////////////////
 
