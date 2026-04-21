@@ -885,24 +885,33 @@ public:
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,3,read_stage), tCrA_copy_view3(_,_,3));
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
 
+      // Throttle to <=3 pending wgmma batches via wait<3> after each commit_batch.
+      // For tiles where MMA_M > 1 (e.g., 256x128) each commit_batch holds MMA_M
+      // wgmma instructions; unthrottled 4 batches = 4*MMA_M wgmmas in flight, which
+      // races with subsequent tmp(_,_,k) overwrites on real H100 workloads.
+      // Depth 3 matches the CUTLASS _mixed_input reference's K_WAIT_MAX = K_BLOCK_MAX-1.
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,0), tCrB(_,_,0,read_stage), accum);
       warpgroup_commit_batch();
+      warpgroup_wait<3>();
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,1), tCrA3(_,_,1), tmp(_,_,1));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,1), tCrB(_,_,1,read_stage), accum);
       warpgroup_commit_batch();
+      warpgroup_wait<3>();
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,2), tCrA3(_,_,2), tmp(_,_,2));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,2), tCrB(_,_,2,read_stage), accum);
       warpgroup_commit_batch();
+      warpgroup_wait<3>();
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,3), tCrA3(_,_,3), tmp(_,_,3));
 
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,3), tCrB(_,_,3,read_stage), accum);
       warpgroup_commit_batch();
+      warpgroup_wait<3>();
 
       --k_tile_count;
       if (k_tile_count == 0) {
@@ -917,6 +926,8 @@ public:
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,1,smem_pipe_read.index()), tCrA_copy_view3(_,_,1));
       copy(smem_tiled_copy_A2, tCsA_copy_view2(_,_,2,smem_pipe_read.index()), tCrA_copy_view2(_,_,2));
       copy(smem_tiled_copy_A3, tCsA_copy_view3(_,_,2,smem_pipe_read.index()), tCrA_copy_view3(_,_,2));
+      // At this point k=1,2,3 are pending (3 batches due to wait<3> above).
+      // wait<3> after the last gemm drained k=0, so tmp(_,_,0) is safe to overwrite.
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
     }
 
@@ -964,6 +975,9 @@ public:
       warpgroup_arrive();
       cute::gemm(tiled_mma, tmp(_,_,3), tCrB(_,_,3,read_stage), accum);
       warpgroup_commit_batch();
+      // Drain the oldest wgmma batch (k_block=0) before overwriting tmp(_,_,0);
+      // see prologue comment above.
+      warpgroup_wait<3>();
       dual_weight_reconstruct<kReconstructionKind>(tCrA2(_,_,0), tCrA3(_,_,0), tmp(_,_,0));
 
       warpgroup_fence_operand(accum);
